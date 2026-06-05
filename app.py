@@ -13,6 +13,10 @@ if not API_KEY:
 BASE_GROQ_URL = "https://api.groq.com/openai/v1"
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "groq-proxy"}
+
 async def proxy(path: str, request: Request):
     try:
         # Собираем целевой URL
