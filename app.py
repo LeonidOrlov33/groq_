@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Разрешаем ВСЕ запросы (CORS) - это нужно для VS Code!
+# 1. Включаем CORS для VS Code
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,10 +21,15 @@ if not API_KEY:
 
 BASE_GROQ_URL = "https://api.groq.com/openai/v1"
 
-# Ловим ВСЕ методы, включая OPTIONS
+# 2. Эндпоинт здоровья (ОБЯЗАТЕЛЬНО ПЕРВЫМ!)
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "groq-proxy"}
+
+# 3. Универсальный прокси (ловит всё остальное)
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy(path: str, request: Request):
-    # Для OPTIONS просто возвращаем OK (предпроверка браузера/VS Code)
+    # Отвечаем на предпроверку OPTIONS
     if request.method == "OPTIONS":
         return Response(status_code=200)
 
@@ -70,7 +75,3 @@ async def proxy(path: str, request: Request):
             status_code=502,
             media_type="application/json"
         )
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "service": "groq-proxy"}
