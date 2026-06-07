@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# CORS для VS Code / Cursor
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,12 +15,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ключи из переменных окружения Render
+# Ключи
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 CEREBRAS_KEY = os.environ.get("CEREBRAS_API_KEY")
 
 if not GROQ_KEY or not CEREBRAS_KEY:
-    raise ValueError("Missing API keys! Check Render Environment Variables.")
+    raise ValueError("Missing API keys!")
 
 PROVIDERS = {
     "groq": "https://api.groq.com/openai",
@@ -37,14 +37,13 @@ async def proxy(path: str, request: Request):
         return Response(status_code=200)
 
     try:
-        # Читаем тело КАК ЕСТЬ (сырые байты)
+        # Читаем сырые байты
         body_bytes = await request.body()
         
-        # Роутинг по умолчанию на Groq
+        # Роутинг
         target_base = PROVIDERS["groq"]
         api_key = GROQ_KEY
         
-        # Если модель Cerebras — переключаемся
         if b'"model"' in body_bytes:
             for kw in [b'gpt-oss-120b', b'zai-glm-4.7']:
                 if kw in body_bytes:
@@ -54,7 +53,7 @@ async def proxy(path: str, request: Request):
                     
         target_url = f"{target_base}/v1/{path}"
         
-        # Заголовки создаем вручную для надежности
+        # Заголовки
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json; charset=utf-8",
@@ -62,17 +61,21 @@ async def proxy(path: str, request: Request):
             "Content-Length": str(len(body_bytes))
         }
         
-        # Отправляем через httpx (байты не перекодируются!)
+        # Убираем host из заголовков клиента, чтобы не конфликтовал
+        client_headers = {k: v for k, v in request.headers.items() 
+                         if k.lower() not in ['host', 'content-length']}
+        headers.update(client_headers)
+        
+        # Отправляем через httpx БЕЗ параметра stream=True
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 target_url,
-                content=body_bytes,
+                content=body_bytes,  # <-- Байты передаются напрямую
                 headers=headers,
-                timeout=httpx.Timeout(10.0, read=180.0),
-                stream=True
+                timeout=httpx.Timeout(10.0, read=180.0)
             )
             
-        # Проброс ошибок от API
+        # Проброс ошибок
         if resp.status_code >= 400:
             return Response(
                 content=resp.content,
@@ -80,7 +83,7 @@ async def proxy(path: str, request: Request):
                 media_type="application/json"
             )
             
-        # Асинхронный стриминг ответа
+        # Стриминг через aiter_bytes (работает без stream=True в httpx 0.27)
         async def stream_gen():
             async for chunk in resp.aiter_bytes(chunk_size=1024):
                 yield chunk
