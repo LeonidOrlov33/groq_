@@ -27,6 +27,12 @@ PROVIDERS = {
     "cerebras": "https://api.cerebras.ai"
 }
 
+# Разрешенные заголовки (только ASCII-safe)
+ALLOWED_HEADERS = {
+    'authorization', 'content-type', 'accept', 'user-agent',
+    'x-request-id', 'traceparent', 'baggage'
+}
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
@@ -37,7 +43,7 @@ async def proxy(path: str, request: Request):
         return Response(status_code=200)
 
     try:
-        # Читаем сырые байты
+        # Читаем сырые байты тела
         body_bytes = await request.body()
         
         # Роутинг
@@ -53,25 +59,31 @@ async def proxy(path: str, request: Request):
                     
         target_url = f"{target_base}/v1/{path}"
         
-        # Заголовки
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json",
-            "Content-Length": str(len(body_bytes))
-        }
+        # ЖЕСТКАЯ ФИЛЬТРАЦИЯ ЗАГОЛОВКОВ
+        # Берем ТОЛЬКО разрешенные заголовки и кодируем их в ASCII
+        safe_headers = {}
+        for key, value in request.headers.items():
+            lower_key = key.lower()
+            if lower_key in ALLOWED_HEADERS:
+                # Принудительно кодируем значение в ASCII, заменяя недопустимые символы
+                try:
+                    safe_headers[key] = value.encode('ascii').decode('ascii')
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    # Если заголовок содержит кириллицу/эмодзи — пропускаем его полностью
+                    continue
         
-        # Убираем host из заголовков клиента, чтобы не конфликтовал
-        client_headers = {k: v for k, v in request.headers.items() 
-                         if k.lower() not in ['host', 'content-length']}
-        headers.update(client_headers)
+        # Добавляем обязательные заголовки
+        safe_headers["Authorization"] = f"Bearer {api_key}"
+        safe_headers["Content-Type"] = "application/json; charset=utf-8"
+        safe_headers["Accept"] = "application/json"
+        safe_headers["Content-Length"] = str(len(body_bytes))
         
-        # Отправляем через httpx БЕЗ параметра stream=True
+        # Отправляем через httpx
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 target_url,
-                content=body_bytes,  # <-- Байты передаются напрямую
-                headers=headers,
+                content=body_bytes,
+                headers=safe_headers,  # <-- Только безопасные ASCII заголовки!
                 timeout=httpx.Timeout(10.0, read=180.0)
             )
             
@@ -83,7 +95,7 @@ async def proxy(path: str, request: Request):
                 media_type="application/json"
             )
             
-        # Стриминг через aiter_bytes (работает без stream=True в httpx 0.27)
+        # Стриминг
         async def stream_gen():
             async for chunk in resp.aiter_bytes(chunk_size=1024):
                 yield chunk
