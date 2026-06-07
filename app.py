@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# 1. Включаем CORS для VS Code
+# Включаем CORS для VS Code / Cursor
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,51 +15,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-API_KEY = os.environ.get("GROQ_API_KEY")
-if not API_KEY:
+# Ключи из переменных окружения Render
+GROQ_KEY = os.environ.get("GROQ_API_KEY")
+CEREBRAS_KEY = os.environ.get("CEREBRAS_API_KEY")
+
+if not GROQ_KEY:
     raise ValueError("GROQ_API_KEY is missing!")
+if not CEREBRAS_KEY:
+    raise ValueError("CEREBRAS_API_KEY is missing!")
 
-BASE_GROQ_URL = "https://api.groq.com/openai/v1"
+# Базовые URL провайдеров (БЕЗ /v1 на конце!)
+PROVIDERS = {
+    "groq": "https://api.groq.com/openai",
+    "cerebras": "https://api.cerebras.ai"
+}
 
-# 2. Эндпоинт здоровья (ОБЯЗАТЕЛЬНО ПЕРВЫМ!)
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "groq-proxy"}
+    return {"status": "ok", "service": "multi-proxy", "providers": ["groq", "cerebras"]}
 
-# 3. Универсальный прокси (ловит всё остальное)
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy(path: str, request: Request):
-    # Отвечаем на предпроверку OPTIONS
     if request.method == "OPTIONS":
         return Response(status_code=200)
 
     try:
-        target_url = f"{BASE_GROQ_URL}/{path}"
-        body = await request.body()
+        # Читаем тело запроса, чтобы определить модель
+        body_bytes = await request.body()
+        
+        # Простая логика роутинга по названию модели
+        target_base = PROVIDERS["groq"]
+        api_key = GROQ_KEY
+        
+        if b'"model"' in body_bytes and b'llama3.1-405b' in body_bytes:
+            target_base = PROVIDERS["cerebras"]
+            api_key = CEREBRAS_KEY
+            
+        # Формируем целевой URL (добавляем /v1 и путь)
+        target_url = f"{target_base}/v1/{path}"
         
         headers = {
-            "Authorization": f"Bearer {API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
         
-        groq_resp = requests.post(
+        resp = requests.post(
             target_url,
-            data=body,
+            data=body_bytes,
             headers=headers,
             stream=True,
             timeout=(10, 180)
         )
         
-        if groq_resp.status_code >= 400:
+        if resp.status_code >= 400:
             return Response(
-                content=groq_resp.content,
-                status_code=groq_resp.status_code,
+                content=resp.content,
+                status_code=resp.status_code,
                 media_type="application/json"
             )
             
         return StreamingResponse(
-            groq_resp.iter_content(chunk_size=1024),
+            resp.iter_content(chunk_size=1024),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
