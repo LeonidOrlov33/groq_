@@ -1,8 +1,9 @@
 import os
-import requests
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+import requests
+from requests import PreparedRequest
 
 app = FastAPI()
 
@@ -62,22 +63,26 @@ async def proxy(path: str, request: Request):
         # Формируем целевой URL (добавляем /v1 и путь от клиента)
         target_url = f"{target_base}/v1/{path}"
         
-        # Явно указываем UTF-8 в заголовке + передаем сырые байты
+        # Явно указываем UTF-8 в заголовке
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json"
         }
         
-        # Отправляем запрос на целевой API
-        resp = requests.post(
-            target_url,
-            data=body_bytes,  # Передаем байты напрямую, без перекодировки
-            headers=headers,
-            stream=True,
-            timeout=(10, 180)
+        # Создаем подготовленный запрос вручную, чтобы bypass'нуть кодировку requests
+        req = PreparedRequest()
+        req.prepare(
+            method='POST',
+            url=target_url,
+            data=body_bytes,
+            headers=headers
         )
         
+        # Отправляем подготовленный запрос через сессию (байты летят "как есть")
+        with requests.Session() as session:
+            resp = session.send(req, stream=True, timeout=(10, 180))
+            
         # Если целевой API вернул ошибку — пробрасываем её клиенту
         if resp.status_code >= 400:
             return Response(
