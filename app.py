@@ -3,10 +3,11 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import Headers
 
 app = FastAPI()
 
-# 1. CORS для VS Code / Cursor
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,62 +16,57 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. Ключи из переменных окружения Render
+# Ключи
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 CEREBRAS_KEY = os.environ.get("CEREBRAS_API_KEY")
 
-if not GROQ_KEY:
-    raise ValueError("GROQ_API_KEY is missing!")
-if not CEREBRAS_KEY:
-    raise ValueError("CEREBRAS_API_KEY is missing!")
+if not GROQ_KEY or not CEREBRAS_KEY:
+    raise ValueError("Missing API keys!")
 
-# 3. Базовые URL (БЕЗ /v1)
 PROVIDERS = {
     "groq": "https://api.groq.com/openai",
     "cerebras": "https://api.cerebras.ai"
 }
 
-# 4. Health check
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "multi-proxy", "providers": ["groq", "cerebras"]}
+    return {"status": "ok"}
 
-# 5. Универсальный прокси
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy(path: str, request: Request):
     if request.method == "OPTIONS":
         return Response(status_code=200)
 
     try:
-        # Читаем сырые байты — UTF-8 сохраняется идеально
+        # Читаем тело КАК ЕСТЬ, без декодирования
         body_bytes = await request.body()
         
-        # Роутинг по модели
+        # Роутинг
         target_base = PROVIDERS["groq"]
         api_key = GROQ_KEY
         
-        cerebras_keywords = [b'gpt-oss-120b', b'zai-glm-4.7']
         if b'"model"' in body_bytes:
-            for keyword in cerebras_keywords:
-                if keyword in body_bytes:
+            for kw in [b'gpt-oss-120b', b'zai-glm-4.7']:
+                if kw in body_bytes:
                     target_base = PROVIDERS["cerebras"]
                     api_key = CEREBRAS_KEY
                     break
                     
         target_url = f"{target_base}/v1/{path}"
         
-        headers = dict(request.headers)
-        # Обновляем заголовки авторизации и контента
-        headers["authorization"] = f"Bearer {api_key}"
-        headers["content-type"] = "application/json; charset=utf-8"
-        # Удаляем заголовок host, чтобы не конфликтовал с целевым сервером
-        headers.pop("host", None)
+        # Создаем заголовки ВРУЧНУЮ, чтобы избежать проблем с ByteString
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+            "Content-Length": str(len(body_bytes))  # Явно указываем длину
+        }
         
-        # httpx отправляет content=bytes БЕЗ перекодировки!
+        # Отправляем через httpx с явным content=bytes
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 target_url,
-                content=body_bytes,  # <-- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
+                content=body_bytes,
                 headers=headers,
                 timeout=httpx.Timeout(10.0, read=180.0),
                 stream=True
@@ -83,26 +79,11 @@ async def proxy(path: str, request: Request):
                 media_type="application/json"
             )
             
-        # Асинхронный стриминг
-        async def stream_generator():
+        # Стриминг
+        async def stream_gen():
             async for chunk in resp.aiter_bytes(chunk_size=1024):
                 yield chunk
                 
         return StreamingResponse(
-            stream_generator(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-        
-    except Exception as e:
-        print(f"Proxy error: {str(e)}")
-        return Response(
-            content=f'{{"error": "{str(e)}"}}',
-            status_code=502,
-            media_type="application/json"
-        )
+            stream_gen(),
+            media_type="text/event
