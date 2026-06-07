@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Включаем CORS для VS Code / Cursor
+# 1. Включаем CORS для VS Code / Cursor
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ключи из переменных окружения Render
+# 2. Загружаем ключи из переменных окружения Render
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 CEREBRAS_KEY = os.environ.get("CEREBRAS_API_KEY")
 
@@ -24,50 +24,61 @@ if not GROQ_KEY:
 if not CEREBRAS_KEY:
     raise ValueError("CEREBRAS_API_KEY is missing!")
 
-# Базовые URL провайдеров (БЕЗ /v1 на конце!)
+# 3. Базовые URL провайдеров (БЕЗ /v1 на конце!)
 PROVIDERS = {
     "groq": "https://api.groq.com/openai",
     "cerebras": "https://api.cerebras.ai"
 }
 
+# 4. Эндпоинт здоровья
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "multi-proxy", "providers": ["groq", "cerebras"]}
 
+# 5. Универсальный прокси с поддержкой UTF-8 и умным роутингом
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy(path: str, request: Request):
+    # Отвечаем на предпроверку OPTIONS
     if request.method == "OPTIONS":
         return Response(status_code=200)
 
     try:
-        # Читаем тело запроса, чтобы определить модель
+        # Читаем тело запроса как сырые байты (сохраняет UTF-8 без искажений)
         body_bytes = await request.body()
         
-        # Простая логика роутинга по названию модели
+        # Определяем целевого провайдера по умолчанию
         target_base = PROVIDERS["groq"]
         api_key = GROQ_KEY
         
-        if b'"model"' in body_bytes and b'llama3.1-405b' in body_bytes:
-            target_base = PROVIDERS["cerebras"]
-            api_key = CEREBRAS_KEY
-            
-        # Формируем целевой URL (добавляем /v1 и путь)
+        # Умный роутинг: если в теле запроса есть ID модели Cerebras — переключаемся
+        cerebras_keywords = [b'gpt-oss-120b', b'zai-glm-4.7']
+        if b'"model"' in body_bytes:
+            for keyword in cerebras_keywords:
+                if keyword in body_bytes:
+                    target_base = PROVIDERS["cerebras"]
+                    api_key = CEREBRAS_KEY
+                    break
+                    
+        # Формируем целевой URL (добавляем /v1 и путь от клиента)
         target_url = f"{target_base}/v1/{path}"
         
+        # Явно указываем UTF-8 в заголовке + передаем сырые байты
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json"
         }
         
+        # Отправляем запрос на целевой API
         resp = requests.post(
             target_url,
-            data=body_bytes,
+            data=body_bytes,  # Передаем байты напрямую, без перекодировки
             headers=headers,
             stream=True,
             timeout=(10, 180)
         )
         
+        # Если целевой API вернул ошибку — пробрасываем её клиенту
         if resp.status_code >= 400:
             return Response(
                 content=resp.content,
@@ -75,6 +86,7 @@ async def proxy(path: str, request: Request):
                 media_type="application/json"
             )
             
+        # Для streaming ответов (чат) используем StreamingResponse
         return StreamingResponse(
             resp.iter_content(chunk_size=1024),
             media_type="text/event-stream",
@@ -87,6 +99,8 @@ async def proxy(path: str, request: Request):
         )
         
     except Exception as e:
+        # Логируем ошибку и возвращаем понятный ответ
+        print(f"Proxy error: {str(e)}")
         return Response(
             content=f'{{"error": "{str(e)}"}}',
             status_code=502,
